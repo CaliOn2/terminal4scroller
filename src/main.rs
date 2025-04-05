@@ -12,21 +12,23 @@ use std::{
         Layout,
         dealloc,
     },
+    rc::Rc,
+    cell::RefCell,
 };
 
 struct Displayfield { 
-    activecomments: Vec<Vec<(*mut Comment, Layout)>>,
-    displaybuffer: Vec<char>,
+    activecomments: Vec<Vec<Rc<Comment>>>,
+    displaybuffer: Vec<u8>,
     buffindex: usize,
     xsize: usize,
     ysize: usize,
 }
 
 struct Comment {
-    content: Vec<char>,
+    content: Vec<u8>,
     width: usize, // this exists because parsing utf-8 is a bitch and multi byte chars are too
-    color: char,
-    reverseindex: isize,
+    color: u8,
+    reverseindex: RefCell<isize>,
 }
 
 fn min(num1: isize, num2: isize) -> isize {
@@ -45,161 +47,159 @@ fn max(num1: isize, num2: isize) -> isize {
 
 impl Displayfield {
 
-    unsafe fn comment2buff(&mut self, comment: (*mut Comment, Layout), textlength: usize) -> usize {
+    fn comment2buff(&mut self, comment: Rc<Comment>) -> usize {
         let x = self.xsize;
-        let commentstopoffset: usize = <isize as TryInto<usize>>::try_into(min((*comment.0).reverseindex, 0) + <usize as TryInto<isize>>::try_into((*comment.0).width).unwrap()).unwrap(); // comment.reverseindex is negative when its out of bounds 
-        let commentstartoffset: usize = (max((*comment.0).reverseindex + <usize as TryInto<isize>>::try_into((*comment.0).width - x).unwrap(), 0)).try_into().unwrap(); // Todo: explain this better
-        let commentfillength: usize = commentstopoffset - commentstartoffset;
+        //if comment.reverseindex > 0.into() && *comment.reverseindex.borrow_mut() + <usize as TryInto<isize>>::try_into(comment.width).unwrap() < x.try_into().unwrap() {
+            self.changecolor(comment.color, self.buffindex);
 
-        self.buffindex += self.changecolor((*comment.0).color, self.buffindex);
+            self.displaybuffer[self.buffindex..(self.buffindex + comment.content.len())].copy_from_slice(&comment.content[0..comment.content.len()]);//&comment.content[commentstartoffset..commentstopoffset]);
 
-        self.displaybuffer[self.buffindex..(self.buffindex + commentfillength)].copy_from_slice(&(*comment.0).content[commentstartoffset..commentstopoffset]);
+            self.buffindex += comment.content.len();//commentfillength;
 
-        self.buffindex += commentfillength;
+            *comment.reverseindex.borrow_mut() += 1;
 
-        (*comment.0).reverseindex += 1;
+            return comment.width + 1;
+        /*} else {
+            // MENTAL ILLNESS UGLY
+            let commentstopoffset: usize = <isize as TryInto<usize>>::try_into(min(*comment.reverseindex.borrow_mut(), 0) + <usize as TryInto<isize>>::try_into(comment.width).unwrap()).unwrap(); // comment.reverseindex is negative when its out of bounds 
+            let commentstartoffset: usize = (max(*comment.reverseindex.borrow_mut() + <usize as TryInto<isize>>::try_into(comment.width).unwrap() - <usize as TryInto<isize>>::try_into(x).unwrap(), 0)).try_into().unwrap(); // Todo: explain this better
+            let commentfillength: usize = commentstopoffset - commentstartoffset;
 
-        return textlength + commentfillength;
+            self.buffindex += self.changecolor(comment.color, self.buffindex);
+
+            self.displaybuffer[self.buffindex..(self.buffindex + commentfillength)].copy_from_slice(&comment.content[commentstartoffset..commentstopoffset]);
+
+            self.buffindex += commentfillength;
+
+            *comment.reverseindex.borrow_mut() += 1;
+
+            return commentfillength + 1;
+        }*/
     }
 
     //fn edgecomment2buff(&mut self, ) -> usize {
         
     //}
 
-    fn changecolor(&mut self, color: char, index: usize) -> usize {
-        const ANSICOLOR: [char; 12] = ['\\','[','\\', '0', '3', '3', '[', '0', '0', 'm', '\\', ']'];
-        self.displaybuffer[index..index + 12].copy_from_slice(&ANSICOLOR);
-        self.displaybuffer[index + 8] = color;
-        return 12;
+    fn changecolor(&mut self, color: u8, index: usize) {
+        const ANSICOLOR: [u8; 5] = [b'\x1B', b'[', b'3', b'1', b'm' ];
+        self.displaybuffer[index..index + 5].copy_from_slice(&ANSICOLOR);
+        self.displaybuffer[index + 3] = color;
+        self.buffindex += 6;
     }
 
-    fn addcomment(&mut self, lineindex: usize, comment: (*mut Comment, Layout)) {
+    fn addcomment(&mut self, lineindex: usize, comment: Comment) {
         // adds item to the start of the list and moves ever other item by 1 so the list size
         // increases by 1
         let line = &mut (self.activecomments[lineindex]);
         let mut commentsindex: usize = line.len() - 1;
 
-        line.push(line[commentsindex]);
+        line.push(Rc::clone(&line[commentsindex]));
         
         while commentsindex > 1 {
             commentsindex -= 1;
-            line[commentsindex + 1] = line[commentsindex];
+            line[commentsindex + 1] = Rc::clone(&line[commentsindex]);
         }
 
-        line[0] = comment;
+        line[0] = Rc::new(comment);
     }
 
     fn init(&mut self, x: usize, y: usize) {
         self.xsize = x;
         self.ysize = y;
-        let mut commentmem: Layout;
-        let mut ptrcomment: *mut Comment;
-        let mut newline: Vec<(*mut Comment, Layout)>;
+        let mut newcomment: Comment;
+        let mut newline: Vec<Rc<Comment>>;
 
         while self.activecomments.len() < y {
             newline = vec![];
-            commentmem = Layout::new::<Comment>();
-            unsafe {
-                ptrcomment = alloc(commentmem) as *mut Comment;
-                (*ptrcomment).content = Vec::new();
-                (*ptrcomment).content.push(' ');
-                (*ptrcomment).width = 1;
-                (*ptrcomment).color = '0';
-                (*ptrcomment).reverseindex = -1;
-                newline.push((ptrcomment, commentmem));
-                self.activecomments.push(newline);
-            }
-            print!("othertest");
+
+            newcomment = Comment{content: Vec::new(), width: 0, color: b'1', reverseindex: RefCell::new(0)};
+
+            newline.push(Rc::new(newcomment));
+
+            self.activecomments.push(newline);
         }
         while self.activecomments.len() > y {
-            let mut emptythislist: Vec<(*mut Comment, Layout)> = self.activecomments.pop().unwrap();
-            while emptythislist.len() > 0 {
-                let commentmem: (*mut Comment, Layout) = emptythislist.pop().unwrap();
-                unsafe {
-                    dealloc(commentmem.0 as *mut u8, commentmem.1);
-                }
-            }
+            self.activecomments.pop();
         }
 
         while self.displaybuffer.len() < (self.ysize * 2 * self.xsize) {
-            self.displaybuffer.push(' ');
+            self.displaybuffer.push(b' ');
         }
     }
 }
  
-fn curl_filter_comment (board: &str, page: u8) -> Vec<(*mut Comment, Layout)> {
+fn curl_filter_comment (board: &str, page: u8) -> Vec<Comment> {
     const GREATERTHAN: [u8; 3] = ['g' as u8, 't' as u8, ';' as u8,];
     const APOSTROPHE: [u8; 5] = ['#' as u8, '0' as u8, '3' as u8, '9' as u8, ';' as u8,];
     const QUOTATION: [u8; 5] = ['q' as u8, 'u' as u8, 'o' as u8, 't' as u8, ';' as u8,];
     let data: Vec<u8> = f4chanrequester(board, page);
-    let mut comments: Vec<(*mut Comment, Layout)> = vec![];
+    let mut comments: Vec<Comment> = vec![];
     let mut colorcounter: u8 = 0;
     let mut dataindex: usize = 0;
-    let mut commentwidth: usize = 0;
-    let mut ptrcomment: *mut Comment;
-    let mut commentmem: Layout;
+    let mut commentwidth: usize;
+    let mut commentcontent: Vec<u8>;
+
 
     while dataindex < (data.len() - 30) {
         if commentstarted(&data[dataindex..dataindex + 5]) { 
             
-            print!("Test");
-            commentmem = Layout::new::<Comment>();
-            unsafe {
-                ptrcomment = alloc(commentmem) as *mut Comment;
-                (*ptrcomment).color = (49 + colorcounter) as char;
-                (*ptrcomment).content = Vec::new();
-            
+            commentwidth = 0;
 
-                colorcounter = (colorcounter + 1) % 10;
+            commentcontent = Vec::new();
 
-                dataindex += 7;
-                while !(data[dataindex] == '"' as u8) {
-                    if data[dataindex] == ('<' as u8) {
-                        while data[dataindex] != ('>' as u8) {
-                            dataindex += 1;
-                        }
-                        //comments[commentindex].push_str("  ");
-                    } else if data[dataindex] == '&' as u8 {
+            dataindex += 7;
+            while !(data[dataindex] == b'"') {
+                if data[dataindex] == (b'<') {
+                    while data[dataindex] != (b'>') {
                         dataindex += 1;
-                        if textcheck(&data[dataindex..dataindex + 3], &GREATERTHAN) {
-
-                            (*ptrcomment).content.push(' ');
-                            (*ptrcomment).content.push('>');
-                            (*ptrcomment).content.push(' ');
-
-
-                            commentwidth += 2;
-                            dataindex += 2;
-                        } else if textcheck(&data[dataindex..dataindex + 5], &APOSTROPHE) {
-
-                            (*ptrcomment).content.push('\'');
-
-                            dataindex += 4;
-                        } else if textcheck(&data[dataindex..dataindex + 5], &QUOTATION) {
-
-                            (*ptrcomment).content.push('"');
-
-                            dataindex += 4;
-                        }
-                    } else if data[dataindex] != '\\' as u8 {
-
-                        (*ptrcomment).content.push(data[dataindex] as char);
-
                     }
+                    //comments[commentindex].push_str("  ");
+                } else if data[dataindex] == b'&' {
+                    dataindex += 1;
+                    if textcheck(&data[dataindex..dataindex + 3], &GREATERTHAN) {
 
-                    if (data[dataindex] as u8 >> 6) != 0b10 {
-                        commentwidth += 1;
+                        commentcontent.push(b' ');
+                        commentcontent.push(b'>');
+                        commentcontent.push(b' ');
+
+
+                        commentwidth += 2;
+                        dataindex += 2;
+                    } else if textcheck(&data[dataindex..dataindex + 5], &APOSTROPHE) {
+
+                        commentcontent.push(b'\'');
+
+                        dataindex += 4;
+                    } else if textcheck(&data[dataindex..dataindex + 5], &QUOTATION) {
+
+                        commentcontent.push(b'"');
+
+                        dataindex += 4;
                     }
+                } else if data[dataindex] != b'\\' {
 
+                    commentcontent.push(data[dataindex]);
+
+                }
+                if (data[dataindex] >> 6) == 0b11 {
+                    dataindex += 1;
+                    while (data[dataindex] >> 6) == 0b10 {
+                        commentcontent.push(data[dataindex]);
+                        dataindex += 1;
+                    }
+                } else {
                     dataindex += 1;
                 }
-                dataindex += 20;
+                commentwidth += 1;
 
-                (*ptrcomment).reverseindex = -(<usize as TryInto<isize>>::try_into(commentwidth)).unwrap();
-                (*ptrcomment).width = commentwidth;
-            
-                comments.push((ptrcomment, commentmem));
             }
+            dataindex += 20;
+
+            comments.push(Comment{color: (49 + colorcounter) as u8, content: commentcontent, reverseindex: RefCell::new(-(<usize as TryInto<isize>>::try_into(commentwidth)).unwrap()), width: commentwidth, });
+
+
+            colorcounter = 1 + (colorcounter + 1) % 9;
         }
         dataindex += 1;
     }
@@ -208,16 +208,18 @@ fn curl_filter_comment (board: &str, page: u8) -> Vec<(*mut Comment, Layout)> {
 
 
 fn main() {
+    const SCREENCLEAR: [u8; 4] = [b'\x1B', b'[', b'2', b'J'];
     let board: String = open();
 
     let mut _page: u8 = 1;
     let mut _activestack: usize = 1;
-    let mut comment_vault: [Vec<(*mut Comment, Layout)>; 2] = [
+    let mut comment_vault: [Vec<Comment>; 2] = [
         curl_filter_comment(&board, _page),
         Default::default()
     ];
 
     let mut textlength: usize; // this is a necessarry value because ansi color changes require unseen bytes
+    let mut linelength: usize;
 
     let mut display: Displayfield = Displayfield {
         activecomments: Default::default(),
@@ -229,54 +231,54 @@ fn main() {
 
     display.init(238, 59);
 
-    let mut linelength: usize;
-    let mut ptrdropcom: (*mut Comment, Layout);
-    
+    let mut linecommentindex: usize;
+    let mut commentfill: usize;
+
     loop {
+        display.displaybuffer[0..4].copy_from_slice(&SCREENCLEAR);
+        display.buffindex += 5;
+        textlength = 0;
+
         for lineindex in 0..display.ysize - 1 {
-            textlength = 0;
 
-            linelength = display.activecomments[lineindex].len();
-            
-            unsafe {
+            linecommentindex = display.activecomments[lineindex].len();
 
-                if (*(display.activecomments[lineindex][linelength - 1].0)).reverseindex > display.xsize.try_into().unwrap() {
-                    ptrdropcom = display.activecomments[lineindex].pop().unwrap();
-                    //drop((*ptrdropcom).content);
+            if *display.activecomments[lineindex][linecommentindex - 1].reverseindex.borrow_mut() > display.xsize.try_into().unwrap() {
+                display.activecomments[lineindex].pop();
 
-                    dealloc(ptrdropcom.0 as *mut u8, ptrdropcom.1);
-                    linelength -= 1;
-                }
-
+                linecommentindex -= 1;
             }
 
-            while linelength > 0  {
+            linelength = 0;
 
-                linelength -= 1;
+            while linecommentindex > 0 && linelength < display.xsize {
 
-                unsafe {
-                    textlength = display.comment2buff(display.activecomments[lineindex][linelength], textlength);
-                }
+                linecommentindex -= 1;
 
+                commentfill = display.comment2buff(Rc::clone(&display.activecomments[lineindex][linecommentindex]));
+                textlength += commentfill;
+                linelength += commentfill;
             }
+
             // check if theres a leftover byte and if there is a new comment is added
             if textlength < display.xsize {
                 if comment_vault[_activestack].is_empty() {
                     _page = 1 + (_page % 8);
-                    curl_filter_comment(&board, _page);
+                    comment_vault[_activestack] = curl_filter_comment(&board, _page);
                 }
                 display.addcomment(lineindex, comment_vault[_activestack].pop().expect("Somehow no comment found (input to addcomment)"));
 
-                unsafe {
-                    display.buffindex += display.changecolor((*display.activecomments[lineindex][0].0).color, display.buffindex);
-                    display.displaybuffer[display.buffindex] = (*display.activecomments[lineindex][0].0).content[0];
-                }
+                display.changecolor(display.activecomments[lineindex][0].color, display.buffindex);
+                display.displaybuffer[display.buffindex] = display.activecomments[lineindex][0].content[0];
 
                 display.buffindex += 1;
             }
+            display.displaybuffer[display.buffindex] = b'\n';
+
+            display.buffindex += 2;
         }
 
-        print!("{}", display.displaybuffer[0..display.buffindex].iter().collect::<String>());
+        print!("{}", std::str::from_utf8(&display.displaybuffer[0..display.buffindex]).unwrap());
 
         std::thread::sleep(time::Duration::from_millis(100));
     }
