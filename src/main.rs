@@ -28,7 +28,10 @@ struct Comment {
     content: Vec<u8>,
     width: usize, // this exists because parsing utf-8 is a bitch and multi byte chars are too
     color: u8,
-    reverseindex: RefCell<isize>,
+    rearoffset: RefCell<usize>,
+    reverseindexraw: RefCell<isize>, 
+    frontoffset: RefCell<usize>,
+    frontoffsetraw: RefCell<usize>
 }
 
 fn min(num1: isize, num2: isize) -> isize {
@@ -48,33 +51,46 @@ fn max(num1: isize, num2: isize) -> isize {
 impl Displayfield {
 
     fn comment2buff(&mut self, comment: Rc<Comment>) -> usize {
+        if comment.width == 0 {
+            return 0;
+        }
         let x = self.xsize;
-        //if comment.reverseindex > 0.into() && *comment.reverseindex.borrow_mut() + <usize as TryInto<isize>>::try_into(comment.width).unwrap() < x.try_into().unwrap() {
-            self.changecolor(comment.color, self.buffindex);
+        let mut offset: isize;
+ 
+        self.changecolor(comment.color, self.buffindex);
 
-            self.displaybuffer[self.buffindex..(self.buffindex + comment.content.len())].copy_from_slice(&comment.content[0..comment.content.len()]);//&comment.content[commentstartoffset..commentstopoffset]);
+        let mut commentstopoffset: usize = (<usize as TryInto<isize>>::try_into(comment.content.len()).unwrap() + min((*comment.reverseindexraw.borrow_mut()).try_into().unwrap(), 0)).try_into().unwrap(); // comment.reverseindex is negative when its out of bounds 
+        let mut commentstartoffset: usize = *comment.frontoffsetraw.borrow_mut(); // Todo: explain this better
 
-            self.buffindex += comment.content.len();//commentfillength;
+        let commentfillength: usize = commentstopoffset - commentstartoffset;
 
-            *comment.reverseindex.borrow_mut() += 1;
+        self.displaybuffer[self.buffindex..(self.buffindex + commentfillength)].copy_from_slice(&comment.content[commentstartoffset..commentstopoffset]);//&comment.content[commentstartoffset..commentstopoffset]);
 
-            return comment.width + 1;
-        /*} else {
-            // MENTAL ILLNESS UGLY
-            let commentstopoffset: usize = <isize as TryInto<usize>>::try_into(min(*comment.reverseindex.borrow_mut(), 0) + <usize as TryInto<isize>>::try_into(comment.width).unwrap()).unwrap(); // comment.reverseindex is negative when its out of bounds 
-            let commentstartoffset: usize = (max(*comment.reverseindex.borrow_mut() + <usize as TryInto<isize>>::try_into(comment.width).unwrap() - <usize as TryInto<isize>>::try_into(x).unwrap(), 0)).try_into().unwrap(); // Todo: explain this better
-            let commentfillength: usize = commentstopoffset - commentstartoffset;
+        self.buffindex += commentfillength;//commentfillength;
+        
+        let charlength: usize = *comment.rearoffset.borrow_mut() - *comment.frontoffset.borrow_mut();
 
-            self.buffindex += self.changecolor(comment.color, self.buffindex);
+        if *comment.rearoffset.borrow_mut() > 0 {
+            *comment.rearoffset.borrow_mut() -= 1;
+            while comment.content.len() < 0 && comment.content[<isize as TryInto<usize>>::try_into(<usize as TryInto<isize>>::try_into(comment.content.len() - 1).unwrap() + (*comment.reverseindexraw.borrow_mut())).unwrap()] >> 6 == 0b10 {
+                *comment.reverseindexraw.borrow_mut() += 1;
+            }
+            
+            offset = -<usize as TryInto<isize>>::try_into((*comment.rearoffset.borrow_mut()).try_into().unwrap()).unwrap();
+            
+        } else {
+            offset = (*comment.reverseindexraw.borrow_mut()).try_into().unwrap();
+        }
 
-            self.displaybuffer[self.buffindex..(self.buffindex + commentfillength)].copy_from_slice(&comment.content[commentstartoffset..commentstopoffset]);
-
-            self.buffindex += commentfillength;
-
-            *comment.reverseindex.borrow_mut() += 1;
-
-            return commentfillength + 1;
-        }*/
+        if comment.width as isize + offset > x.try_into().unwrap() {
+            *comment.frontoffset.borrow_mut() += 1;
+            while comment.content[*comment.frontoffsetraw.borrow_mut()] >> 6 == 0b10 {
+                *comment.frontoffsetraw.borrow_mut() += 1;
+            } 
+        }
+         
+        *comment.reverseindexraw.borrow_mut() += 1;
+        return charlength;
     }
 
     //fn edgecomment2buff(&mut self, ) -> usize {
@@ -113,7 +129,14 @@ impl Displayfield {
         while self.activecomments.len() < y {
             newline = vec![];
 
-            newcomment = Comment{content: Vec::new(), width: 0, color: b'1', reverseindex: RefCell::new(0)};
+            newcomment = Comment{
+                content: Vec::new(),
+                width: 0, color: b'1',
+                rearoffset: RefCell::new(0),
+                reverseindexraw: RefCell::new(0),
+                frontoffset: RefCell::new(0),
+                frontoffsetraw: RefCell::new(0),
+            };
 
             newline.push(Rc::new(newcomment));
 
@@ -139,6 +162,7 @@ fn curl_filter_comment (board: &str, page: u8) -> Vec<Comment> {
     let mut dataindex: usize = 0;
     let mut commentwidth: usize;
     let mut commentcontent: Vec<u8>;
+    let mut commentlength: usize;
 
 
     while dataindex < (data.len() - 30) {
@@ -182,22 +206,28 @@ fn curl_filter_comment (board: &str, page: u8) -> Vec<Comment> {
                     commentcontent.push(data[dataindex]);
 
                 }
-                if (data[dataindex] >> 6) == 0b11 {
-                    dataindex += 1;
-                    while (data[dataindex] >> 6) == 0b10 {
-                        commentcontent.push(data[dataindex]);
-                        dataindex += 1;
-                    }
-                } else {
+                dataindex += 1;
+                while (data[dataindex] >> 6) == 0b10 {
+                    commentcontent.push(data[dataindex]);
                     dataindex += 1;
                 }
+
                 commentwidth += 1;
 
             }
             dataindex += 20;
 
-            comments.push(Comment{color: (49 + colorcounter) as u8, content: commentcontent, reverseindex: RefCell::new(-(<usize as TryInto<isize>>::try_into(commentwidth)).unwrap()), width: commentwidth, });
+            commentlength = commentcontent.len();
 
+            comments.push(Comment{
+                color: (49 + colorcounter) as u8,
+                content: commentcontent,
+                width: commentwidth,
+                rearoffset: RefCell::new(commentwidth - 1),
+                reverseindexraw: RefCell::new(-(<usize as TryInto<isize>>::try_into(commentlength - 1).unwrap())),
+                frontoffset: RefCell::new(0),
+                frontoffsetraw: RefCell::new(0),
+            });
 
             colorcounter = 1 + (colorcounter + 1) % 9;
         }
@@ -235,15 +265,20 @@ fn main() {
     let mut commentfill: usize;
 
     loop {
+        display.buffindex = 0;
         display.displaybuffer[0..4].copy_from_slice(&SCREENCLEAR);
         display.buffindex += 5;
         textlength = 0;
 
         for lineindex in 0..display.ysize - 1 {
 
+            display.displaybuffer[display.buffindex] = b'\n';
+
+            display.buffindex += 1;
+
             linecommentindex = display.activecomments[lineindex].len();
 
-            if *display.activecomments[lineindex][linecommentindex - 1].reverseindex.borrow_mut() > display.xsize.try_into().unwrap() {
+            if *display.activecomments[lineindex][linecommentindex - 1].frontoffset.borrow_mut() > display.activecomments[lineindex][linecommentindex - 1].width {
                 display.activecomments[lineindex].pop();
 
                 linecommentindex -= 1;
@@ -261,7 +296,7 @@ fn main() {
             }
 
             // check if theres a leftover byte and if there is a new comment is added
-            if textlength < display.xsize {
+            if linelength < display.xsize {
                 if comment_vault[_activestack].is_empty() {
                     _page = 1 + (_page % 8);
                     comment_vault[_activestack] = curl_filter_comment(&board, _page);
@@ -273,9 +308,6 @@ fn main() {
 
                 display.buffindex += 1;
             }
-            display.displaybuffer[display.buffindex] = b'\n';
-
-            display.buffindex += 2;
         }
 
         print!("{}", std::str::from_utf8(&display.displaybuffer[0..display.buffindex]).unwrap());
